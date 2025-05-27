@@ -18,3 +18,7 @@ tidymodels
 ## commit pull push
 
 ## branch
+
+1)  tworzenie branch z poziomu rstudio
+2)  wysylanie commitow
+3)  gdzie trafił commity
