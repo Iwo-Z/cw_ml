@@ -1,0 +1,99 @@
+---
+title: "cwiczenie_1"
+author: "Iwo"
+format: 
+  html:
+    self-contained: true
+    toc: true
+    toc-depth: 4
+    toc-location: right
+    toc-title: "Spis treści"
+    number-sections: true
+    number-depth: 4
+    code-fold: show
+    code-summary: "Show the code"
+    code-tools: true
+    code-block-bg: true
+    code-block-border-left: "black"
+    code-line-numbers: false
+    code-copy: true
+    html-math-method: katex
+    smooth-scroll: true
+    anchor-sections: true
+    link-external-icon: true
+    link-external-newwindow: true
+    theme:
+        light: cosmo
+        dark: darkly
+    fontsize: 1.0em
+    linestretch: 1.5
+execute:
+  warning: false
+  echo: true
+  error: false
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+# Ładujemy wymagane pakiety
+library(tidyverse)
+library(GGally)
+library(modelr)
+
+# Nazwy kolumn na małe litery (dla wygody)
+colnames(airquality) <- tolower(colnames(airquality))
+
+# Przygotowanie danych:
+# - konwersja do tibble
+# - usunięcie braków danych
+# - usunięcie zmiennej 'day' (nie używamy jej do predykcji)
+# - przekształcenie zmiennej 'month' do formy kategorycznej
+air <- 
+  airquality |>
+  as_tibble() |> 
+  na.omit() |> 
+  select(-day) |> 
+  mutate(month = factor(month))  # miesiąc jako zmienna jakościowa
+
+# Podgląd danych i zależności pomiędzy zmiennymi
+# Używamy GGally::ggpairs do eksploracji danych
+air |> 
+  ggpairs()
+```
+
+
+```{r}
+# Budujemy model liniowy: O3 jako zmienna zależna
+# Bez interakcji między zmiennymi
+model <- lm(ozone ~ ., data = air)
+
+# Podsumowanie modelu: sprawdź, które zmienne są istotne
+summary(model)
+```
+
+```{r}
+# Przykładowy zbiór danych do prognozy
+new_data <- tibble(
+  solar.r = c(200, 100, 150),
+  wind = c(5.0, 10.0, 7.5),
+  temp = c(85, 70, 77),
+  month = factor(c(7, 9, 6), levels = levels(air$month))
+)
+
+# Prognozowane wartości O3 na podstawie modelu liniowego
+pred_o3 <- predict(model, newdata = new_data)
+
+# Łączymy dane i prognozy do jednego zbioru
+bind_cols(new_data, o3_pred = pred_o3)
+```
+
+**Wpływ miesięcy**:
+   - Spośród miesięcy, tylko wrzesień (`month9`) miał istotny statystycznie wpływ na stężenie ozonu (ujemny efekt).
+   - Pozostałe miesiące (czerwiec, lipiec, sierpień) nie wykazały istotnego wpływu przy poziomie istotności 0.05.
+
+**Prognoza**:
+   - Na podstawie nowego zestawu danych oszacowano przykładowe wartości stężenia ozonu.
+   - Wyniki pokazują zróżnicowane wartości O₃ w zależności od warunków meteorologicznych i miesiąca, co potwierdza przydatność modelu do przewidywania jakości powietrza.
+
+
