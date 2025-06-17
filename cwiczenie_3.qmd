@@ -1,0 +1,372 @@
+---
+title: "cwiczenie_1"
+author: "Iwo"
+format: 
+  html:
+    self-contained: true
+    toc: true
+    toc-depth: 4
+    toc-location: right
+    toc-title: "Spis treści"
+    number-sections: true
+    number-depth: 4
+    code-fold: show
+    code-summary: "Show the code"
+    code-tools: true
+    code-block-bg: true
+    code-block-border-left: "black"
+    code-line-numbers: false
+    code-copy: true
+    html-math-method: katex
+    smooth-scroll: true
+    anchor-sections: true
+    link-external-icon: true
+    link-external-newwindow: true
+    theme:
+        light: cosmo
+        dark: darkly
+    fontsize: 1.0em
+    linestretch: 1.5
+execute:
+  warning: false
+  echo: true
+  error: false
+editor_options: 
+  chunk_output_type: console
+---
+
+# Materiały do ćwiczenia 2
+
+## Wczytywanie danych
+
+```{r}
+library(tidymodels) 
+library(skimr) 
+library(GGally) 
+library(openair) 
+tidymodels_prefer()
+
+air <- mydata |> selectByDate(year = 2002) 
+air |> skim()
+air <- air |> na.omit()
+```
+
+```{r}
+set.seed(222)
+air[sample(1:nrow(air), size = 300, replace = F),] |> 
+  select(nox, no2) |> 
+  ggpairs()
+```
+
+### Wykres regresji liniowej, do sprawdzenia danych 
+
+```{r}
+library(ggpubr)
+air[sample(1:nrow(air), size = 300, replace = F),] |> 
+  select(nox, no2) |> 
+  ggplot(aes(nox, no2)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = T, formula = y ~ x) + 
+  stat_cor(label.x = 10, label.y = 80) + 
+  stat_regline_equation(label.x = 10, label.y = 82) +
+  theme_bw()
+```
+
+```{r}
+air |>    
+  ggplot(aes(date, o3)) +     
+  geom_line() +     
+  theme_bw()
+```
+
+```{r}
+air |> 
+  pull(o3) |> 
+  range()  
+
+air <-
+  air |>
+  mutate(ozone = cut(
+    o3,
+    breaks = c(-0.1, 10, 53),
+    labels = c("Niskie", "Wysokie")
+  ))
+
+air |> count(ozone)
+```
+
+# Ćwiczenie 2
+
+## Przygotowanie danych daty
+
+```{r}
+set.seed(222)
+library(lubridate)
+
+air <- air |> 
+  mutate(
+    month = factor(month(date), labels = month.abb),
+    wday = factor(wday(date, label = TRUE)),
+    hour = hour(date)
+  )
+
+split <- initial_split(air, strata = ozone, prop = 0.8)
+train <- training(split)
+test <- testing(split)
+
+```
+
+## Receptura
+
+```{r}
+rec <- recipe(ozone ~ ., data = train) |>
+  update_role(date, o3, new_role = "ID") |>
+  step_rm(nox) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_YeoJohnson(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors())
+
+```
+
+nox usuwamy, bo mocno koreluje z no2
+
+## Model logistyczny
+
+```{r}
+log_spec <- logistic_reg() |> 
+  set_engine("glm")
+
+log_wf <- workflow() |> 
+  add_recipe(rec) |> 
+  add_model(log_spec)
+
+log_fit <- fit(log_wf, data = train)
+```
+
+## Prognozy i ewaluacja
+
+```{r}
+log_pred <- predict(log_fit, test, type = "prob") |> 
+  bind_cols(predict(log_fit, test)) |> 
+  bind_cols(test |> select(ozone))
+
+log_pred |> roc_auc(truth = ozone, .pred_Wysokie)
+
+log_pred |> conf_mat(truth = ozone, estimate = .pred_class)
+
+log_pred |> 
+  roc_curve(truth = ozone, .pred_Wysokie) |> 
+  autoplot()
+```
+
+# Ćwiczenie 3
+
+```{r}
+library(ranger)
+library(modeldata)
+library(tidymodels)
+tidymodels_prefer()
+
+data("cells", package = "modeldata")
+cells
+
+cells |> 
+  count(class) |> 
+  mutate(prop = n/sum(n) * 100 |> round(x = _, digits = 1))
+
+set.seed(123)
+cell_split <- initial_split(data = cells |> select(-case),
+                            strata = class, prop = 3/4)
+
+cell_train <- training(cell_split)
+cell_test <- testing(cell_split)
+
+nrow(cell_test)/nrow(cells) ; nrow(cell_train)/nrow(cells) # udział
+
+cell_test |> 
+  count(class) |> 
+  mutate(prop = n/sum(n))
+
+cell_train |> 
+  count(class) |> 
+  mutate(prop = n/sum(n))
+```
+
+```{r}
+rf_mod <- 
+  rand_forest() |> 
+  set_engine("ranger") |> 
+  set_mode("classification")
+
+set.seed(234)
+rf_fit <- 
+  rf_mod |> 
+  fit(class ~ ., data = cell_train)
+rf_fit
+
+# Predykcja 
+rf_pred_train <-
+  predict(rf_fit, new_data = cell_train) |> 
+  bind_cols(predict(rf_fit, new_data = cell_train, type = "prob")) |> 
+  bind_cols(cell_train |> select(class))
+
+# Krzywa ROC
+rf_pred_train |> 
+  roc_curve(truth = class, .pred_PS) |> 
+  autoplot()
+
+# Pole powierzchni pod krzywą 
+rf_pred_train |> 
+  roc_auc(truth = class, .pred_PS)
+
+# Dokłądność
+rf_pred_train |> 
+  accuracy(truth = class, .pred_class)
+```
+
+
+```{r}
+rf_pred_test <- 
+  predict(rf_fit, new_data = cell_test) |> 
+  bind_cols(predict(rf_fit, new_data = cell_test, type = "prob")) |> 
+  bind_cols(cell_test |> select(class))
+
+# Krzywa rock
+rf_pred_test |> 
+  roc_curve(truth = class, .pred_PS) |> 
+  autoplot()
+
+# Powierzchnia pod krzywą 
+rf_pred_test |> 
+  roc_auc(truth = class, .pred_PS)
+
+# Dokłądność
+rf_pred_test |> 
+  accuracy(truth = class, .pred_class)
+```
+
+### tidymodels
+
+```{r}
+# 2) rsmaple - CV folds
+
+set.seed(345)
+folds <- vfold_cv(data = cell_train, v = 10)
+
+# 3) parsnip - model
+
+rf_mod <- 
+  rand_forest() |> 
+  set_engine("ranger") |> 
+  set_mode("classification")
+
+# print data
+folds 
+
+# 4) workflow
+rf_wf <- 
+  workflow() |> 
+  add_model(rf_mod) |> 
+  add_formula(class ~ .)
+
+# 5) tune 
+set.seed(456)
+rf_fit_rs <- 
+  rf_wf |> 
+  fit_resamples(folds)
+
+rf_fit_rs |> 
+  collect_metrics() |> 
+  knitr::kable(digits = 3)
+
+bind_rows(
+  rf_pred_test |>
+    roc_auc(truth = class, .pred_PS),
+  
+  rf_pred_test |>
+    accuracy(truth = class, .pred_class)
+) |>
+  knitr::kable(digits = 3)
+```
+
+## Zastosowanie resamplingu do ćw 2
+
+```{r}
+set.seed(123)
+air <- air |>
+  mutate(
+    month = factor(month(date), labels = month.abb),
+    wday = factor(wday(date, label = TRUE)),
+    hour = hour(date)
+  )
+
+split <- initial_split(air, strata = ozone, prop = 0.8)
+train <- training(split)
+test <- testing(split)
+
+rec <- recipe(ozone ~ ., data = train) |>
+  update_role(date, o3, new_role = "ID") |>
+  step_rm(nox) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_YeoJohnson(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors())
+
+cv_folds <- vfold_cv(train, v = 10, strata = ozone)
+boot_folds <- bootstraps(train, times = 30, strata = ozone)
+```
+
+```{r}
+log_spec <- logistic_reg() |> set_engine("glm")
+
+log_wf <- workflow() |>
+  add_recipe(rec) |>
+  add_model(log_spec)
+
+# V-fold CV
+log_fit_cv <- fit_resamples(
+  log_wf,
+  resamples = cv_folds,
+  metrics = metric_set(roc_auc, accuracy)
+)
+
+# Bootstrap
+log_fit_boot <- fit_resamples(
+  log_wf,
+  resamples = boot_folds,
+  metrics = metric_set(roc_auc, accuracy)
+)
+```
+
+```{r}
+rf_spec <- rand_forest() |> 
+  set_engine("ranger") |> 
+  set_mode("classification")
+
+rf_wf <- workflow() |>
+  add_recipe(rec) |>
+  add_model(rf_spec)
+
+# V-fold CV
+rf_fit_cv <- fit_resamples(
+  rf_wf,
+  resamples = cv_folds,
+  metrics = metric_set(roc_auc, accuracy)
+)
+
+# Bootstrap
+rf_fit_boot <- fit_resamples(
+  rf_wf,
+  resamples = boot_folds,
+  metrics = metric_set(roc_auc, accuracy)
+)
+```
+
+```{r}
+log_fit_cv |> collect_metrics()
+
+log_fit_boot |> collect_metrics()
+
+rf_fit_cv |> collect_metrics()
+
+rf_fit_boot |> collect_metrics()
+```
