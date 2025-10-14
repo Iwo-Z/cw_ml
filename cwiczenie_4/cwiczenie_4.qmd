@@ -1,0 +1,387 @@
+---
+title: "cwiczenie_4"
+author: "Iwo"
+format: 
+  html:
+    self-contained: true
+    toc: true
+    toc-depth: 4
+    toc-location: right
+    toc-title: "Spis treści"
+    number-sections: true
+    number-depth: 4
+    code-fold: show
+    code-summary: "Show the code"
+    code-tools: true
+    code-block-bg: true
+    code-block-border-left: "black"
+    code-line-numbers: false
+    code-copy: true
+    html-math-method: katex
+    smooth-scroll: true
+    anchor-sections: true
+    link-external-icon: true
+    link-external-newwindow: true
+    theme:
+        light: cosmo
+        dark: darkly
+    fontsize: 1.0em
+    linestretch: 1.5
+execute:
+  warning: false
+  echo: true
+  error: false
+editor_options: 
+  chunk_output_type: console
+---
+
+# Wczytywanie bibliotek i danych z ćwiczenia 2
+
+```{r}
+library(tidymodels) 
+library(skimr) 
+library(GGally) 
+library(openair)
+library(lubridate)
+library(future)
+library(ggplot2)
+tidymodels_prefer()
+set.seed(222)
+
+air <- mydata |> selectByDate(year = 2002) 
+air |> skim()
+air <- air |> na.omit()
+
+air <-
+  air |>
+  mutate(ozone = cut(
+    o3,
+    breaks = c(-0.1, 10, 53),
+    labels = c("Niskie", "Wysokie")
+  ))
+
+air |> count(ozone)
+
+air_prepared <- air |> 
+  mutate(
+    month = month(date),
+    day_of_year = yday(date),
+    is_weekend = ifelse(wday(date) %in% c(1, 7), 1, 0)
+  )
+
+# Sprawdzenie korelacji
+cat("\nKorelacja NO2 z O3:", cor(air_prepared$no2, air_prepared$o3), "\n")
+cat("Korelacja NOX z O3:", cor(air_prepared$nox, air_prepared$o3), "\n")
+
+air_split <- initial_split(air_prepared, 
+                           prop = 0.75, 
+                           strata = ozone)
+air_train <- training(air_split)
+air_test <- testing(air_split)
+
+ozone_recipe <- recipe(ozone ~ ., data = air_train) |>
+  step_rm(date, o3, co, nox, wd) |>
+  step_YeoJohnson(pm10, pm25, so2, no2, ws) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors())
+```
+
+# Resampling
+
+## Cross Validation
+
+```{r}
+logistic_spec <- logistic_reg() |>
+  set_engine("glm") |>
+  set_mode("classification")
+
+logistic_wf <- workflow() |>
+  add_recipe(ozone_recipe) |>
+  add_model(logistic_spec)
+
+air_folds <- vfold_cv(air_train, v = 10, strata = ozone)
+
+cv_logistic <- fit_resamples(
+  logistic_wf,
+  resamples = air_folds,
+  metrics = metric_set(accuracy, roc_auc, sens, spec, precision),
+  control = control_resamples(save_pred = TRUE)
+)
+
+cv_logistic_metrics <- collect_metrics(cv_logistic)
+cv_logistic_metrics
+```
+
+## Random Forest
+
+```{r}
+rf_spec <- rand_forest(
+  trees = 500,
+  mtry = tune(),
+  min_n = tune()
+) |>
+  set_engine("ranger", importance = "permutation") |>
+  set_mode("classification")
+
+rf_wf <- workflow() |>
+  add_recipe(ozone_recipe) |>
+  add_model(rf_spec)
+
+rf_grid <- grid_random(
+  parameters(mtry() %>% range_set(c(2, 8)), min_n()),
+  size = 10
+)
+
+cv_rf <- tune_grid(
+  rf_wf,
+  resamples = air_folds,
+  grid = rf_grid,
+  metrics = metric_set(accuracy, roc_auc, sens, spec),
+  control = control_resamples(save_pred = TRUE)
+)
+
+best_rf_params <- select_best(cv_rf, metric = "roc_auc")
+
+cv_rf_final <- finalize_workflow(rf_wf, best_rf_params)
+cv_rf_results <- fit_resamples(cv_rf_final, resamples = air_folds,
+                              metrics = metric_set(accuracy, roc_auc, sens, spec))
+
+cv_rf_metrics <- collect_metrics(cv_rf_results)
+cv_rf_metrics
+```
+
+# V-krotna Cross Validation
+
+## Cross Validation
+
+```{r}
+vfold_comparison_logistic <- function(v_values) {
+  results <- list()
+  
+  for(v in v_values) {
+    folds <- vfold_cv(air_train, v = v, strata = ozone)
+    
+    cv_result <- fit_resamples(
+      logistic_wf,
+      resamples = folds,
+      metrics = metric_set(accuracy, roc_auc, sens, spec)
+    )
+    
+    results[[paste0("V", v)]] <- collect_metrics(cv_result) |>
+      mutate(v_folds = v)
+  }
+  
+  bind_rows(results)
+}
+
+v_values <- c(5, 10, 15)
+vfold_logistic_results <- vfold_comparison_logistic(v_values)
+vfold_logistic_results
+```
+
+## Random Forest
+
+```{r}
+vfold_comparison_rf <- function(v_values) {
+  results <- list()
+  
+  for(v in v_values) {
+    folds <- vfold_cv(air_train, v = v, strata = ozone)
+    
+    rf_simple <- rand_forest(trees = 200) |>
+      set_engine("ranger") |>
+      set_mode("classification")
+    
+    rf_wf_simple <- workflow() |>
+      add_recipe(ozone_recipe) |>
+      add_model(rf_simple)
+    
+    cv_result <- fit_resamples(
+      rf_wf_simple,
+      resamples = folds,
+      metrics = metric_set(accuracy, roc_auc, sens, spec)
+    )
+    
+    results[[paste0("V", v)]] <- collect_metrics(cv_result) |>
+      mutate(v_folds = v)
+  }
+  
+  bind_rows(results)
+}
+
+vfold_rf_results <- vfold_comparison_rf(v_values)
+vfold_rf_results
+```
+
+# Bootstrap
+
+## Bootstrap
+
+```{r}
+bootstraps <- bootstraps(air_train, times = 100, strata = ozone)
+
+boot_logistic <- fit_resamples(
+  logistic_wf,
+  resamples = bootstraps,
+  metrics = metric_set(accuracy, roc_auc, sens, spec)
+)
+
+boot_logistic_metrics <- collect_metrics(boot_logistic)
+boot_logistic_metrics
+
+boot_logistic_details <- collect_metrics(boot_logistic, summarize = FALSE)
+```
+
+## Random Forest
+
+```{r}
+rf_simple <- rand_forest(trees = 200) |>
+  set_engine("ranger") |>
+  set_mode("classification")
+
+rf_wf_simple <- workflow() |>
+  add_recipe(ozone_recipe) |>
+  add_model(rf_simple)
+
+boot_rf <- fit_resamples(
+  rf_wf_simple,
+  resamples = bootstraps,
+  metrics = metric_set(accuracy, roc_auc, sens, spec)
+)
+
+boot_rf_metrics <- collect_metrics(boot_rf)
+boot_rf_metrics
+
+boot_rf_details <- collect_metrics(boot_rf, summarize = FALSE)
+```
+
+# Porównanie metod
+
+```{r}
+comparison_table <- bind_rows(
+  cv_logistic_metrics |> mutate(model = "Logistic_CV", method = "10-fold CV"),
+  cv_rf_metrics |> mutate(model = "RF_CV", method = "10-fold CV"),
+  boot_logistic_metrics |> mutate(model = "Logistic_Boot", method = "Bootstrap"),
+  boot_rf_metrics |> mutate(model = "RF_Boot", method = "Bootstrap")
+) |>
+  select(model, method, .metric, mean, std_err, n)
+
+comparison_table
+```
+
+## Wykresy
+
+```{r}
+# Wykres porównawczy AUC
+auc_comparison <- comparison_table |>
+  filter(.metric == "roc_auc") |>
+  ggplot(aes(x = model, y = mean, fill = method)) +
+  geom_col(position = "dodge") +
+  geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err),
+                position = position_dodge(0.9), width = 0.2) +
+  labs(title = "Porównanie AUC dla różnych metod resamplingu",
+       y = "AUC", x = "Model i metoda") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2")
+
+auc_comparison
+
+# Wykres porównawczy dokładności
+accuracy_comparison <- comparison_table |>
+  filter(.metric == "accuracy") |>
+  ggplot(aes(x = model, y = mean, fill = method)) +
+  geom_col(position = "dodge") +
+  geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err),
+                position = position_dodge(0.9), width = 0.2) +
+  labs(title = "Porównanie dokładności dla różnych metod resamplingu",
+       y = "Accuracy", x = "Model i metoda") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set1")
+
+accuracy_comparison
+```
+
+# Modele
+
+## Finalny model regresji logistycznej
+
+```{r}
+final_logistic <- fit(logistic_wf, air_train)
+
+test_pred_logistic <- augment(final_logistic, air_test)
+
+logistic_test_metrics <- metric_set(accuracy, roc_auc, sens, spec)(
+  test_pred_logistic,
+  truth = ozone,
+  estimate = .pred_class,
+  .pred_Wysokie
+)
+
+logistic_test_metrics
+```
+
+## Finalny model random forest
+
+```{r}
+final_rf_wf <- finalize_workflow(rf_wf, best_rf_params)
+final_rf <- fit(final_rf_wf, air_train)
+
+test_pred_rf <- augment(final_rf, air_test)
+
+rf_test_metrics <- metric_set(accuracy, roc_auc, sens, spec)(
+  test_pred_rf,
+  truth = ozone,
+  estimate = .pred_class,
+  .pred_Wysokie
+)
+
+rf_test_metrics
+```
+
+# ćwiczenie 4
+
+```{r}
+rf_spec_extended <- rand_forest(
+  trees = tune(),
+  mtry = tune(), 
+  min_n = tune()
+) |>
+  set_engine("ranger", sample.fraction = tune()) |>
+  set_mode("classification")
+
+rf_params <- parameters(rf_spec_extended) |>
+  update(
+    sample.fraction = sample_prop(c(0.5, 0.9))
+  ) |>
+  finalize(air_train)
+
+rf_params
+
+rf_grid_extended <- grid_latin_hypercube(
+  rf_params,
+  size = 20
+)
+
+rf_grid_extended
+
+args(rand_forest)
+args(ranger)
+```
+
+# Wnioski - Dostrojenie hiperparametrów Random Forest
+
+## Kluczowe parametry:
+
+**`mtry`** - liczba zmiennych w podziale  
+- Wpływa na różnorodność drzew
+- Zbyt niska: utrata dokładności
+- Zbyt wysoka: zmniejszenie różnorodności
+
+**`min_n`** - minimalna liczba obserwacji w węźle  
+- Kontroluje regularyzację
+- Wyższe wartości: zapobiegają overfitting
+- Niższe wartości: bardziej złożone drzewa
+
+**`trees`** - liczba drzew  
+- Więcej = stabilniej, ale wolniej
+- 200-500 zwykle wystarcza
