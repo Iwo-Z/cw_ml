@@ -1,0 +1,207 @@
+---
+title: "cwiczenie_2"
+author: "Iwo"
+format: 
+  html:
+    self-contained: true
+    toc: true
+    toc-depth: 4
+    toc-location: right
+    toc-title: "Spis treści"
+    number-sections: true
+    number-depth: 4
+    code-fold: show
+    code-summary: "Show the code"
+    code-tools: true
+    code-block-bg: true
+    code-block-border-left: "black"
+    code-line-numbers: false
+    code-copy: true
+    html-math-method: katex
+    smooth-scroll: true
+    anchor-sections: true
+    link-external-icon: true
+    link-external-newwindow: true
+    theme:
+        light: cosmo
+        dark: darkly
+    fontsize: 1.0em
+    linestretch: 1.5
+execute:
+  warning: false
+  echo: true
+  error: false
+editor_options: 
+  chunk_output_type: console
+---
+
+## Wczytywanie danych
+
+```{r}
+library(tidymodels) 
+library(skimr) 
+library(GGally) 
+library(openair)
+library(lubridate)
+tidymodels_prefer()
+
+air <- mydata |> selectByDate(year = 2002) 
+air |> skim()
+air <- air |> na.omit()
+```
+
+```{r}
+set.seed(222)
+air[sample(1:nrow(air), size = 300, replace = F),] |> 
+  select(nox, no2) |> 
+  ggpairs()
+```
+
+## Wykres regresji liniowej, do sprawdzenia danych 
+
+```{r}
+library(ggpubr)
+air[sample(1:nrow(air), size = 300, replace = F),] |> 
+  select(nox, no2) |> 
+  ggplot(aes(nox, no2)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = T, formula = y ~ x) + 
+  stat_cor(label.x = 10, label.y = 80) + 
+  stat_regline_equation(label.x = 10, label.y = 82) +
+  theme_bw()
+```
+
+```{r}
+air |>    
+  ggplot(aes(date, o3)) +     
+  geom_line() +     
+  theme_bw()
+```
+
+```{r}
+air |> 
+  pull(o3) |> 
+  range()  
+
+air <-
+  air |>
+  mutate(ozone = cut(
+    o3,
+    breaks = c(-0.1, 10, 53),
+    labels = c("Niskie", "Wysokie")
+  ))
+
+air |> count(ozone)
+```
+
+# Ćwiczenie 2
+
+## Przygotowanie danych daty
+
+```{r}
+air_prepared <- air |> 
+  mutate(
+    month = month(date),
+    day_of_year = yday(date),
+    is_weekend = ifelse(wday(date) %in% c(1, 7), 1, 0)
+  )
+
+```
+
+## Sprawdzenie, czy no2 czy nox lepiej koreluje z o3
+
+```{r}
+cat("\nKorelacja NO2 z O3:", cor(air_prepared$no2, air_prepared$o3), "\n")
+cat("Korelacja NOX z O3:", cor(air_prepared$nox, air_prepared$o3), "\n")
+```
+
+Wybieramy no2
+
+## Podział danych
+
+```{r}
+air_split <- initial_split(air_prepared, 
+                           prop = 0.75, 
+                           strata = ozone)
+air_train <- training(air_split)
+air_test <- testing(air_split)
+```
+
+## Receptura
+
+```{r}
+ozone_recipe <- recipe(ozone ~ ., data = air_train) |>
+  # Usunięcie zbędnych zmiennych
+  step_rm(date, o3, co, nox, wd) |>
+  # WYJAŚNIENIE USUNIĘĆ:
+  # - date: już wyekstrahowane (month, day_of_year, is_weekend)
+  # - o3: to nasz target (nie może być predyktorem)
+  # - co: bardzo słaba korelacja z o3
+  # - nox: multicolinearność z no2, no2 lepiej koreluje z o3
+  # - wd: zbyt wiele kategorii, ws (prędkość wiatru) wystarczy
+  
+  # Przekształcenie YeoJohnson dla skośnych zmiennych
+  # (lepsze niż BoxCox, bo obsługuje wartości <= 0)
+  step_YeoJohnson(pm10, pm25, so2, no2, ws) |>
+  
+  # Normalizacja - WAŻNA dla regresji logistycznej
+  step_normalize(all_numeric_predictors()) |>
+  
+  # Kodowanie kategorycznych
+  step_dummy(all_nominal_predictors())
+```
+
+## Model logistyczny i trenowanie
+
+```{r}
+logistic_spec <- logistic_reg() |>
+  set_engine("glm") |>
+  set_mode("classification")
+
+ozone_workflow <- workflow() |>
+  add_recipe(ozone_recipe) |>
+  add_model(logistic_spec)
+
+ozone_fit <- fit(ozone_workflow, data = air_train)
+
+ozone_fit |> 
+  extract_fit_parsnip() |> 
+  tidy() |> 
+  arrange(desc(abs(statistic)))
+```
+
+## Prognozy i ewaluacja
+
+```{r}
+test_pred <- augment(ozone_fit, air_test)
+```
+
+## Macierz konfuzji
+
+```{r}
+conf_mat(test_pred, truth = ozone, estimate = .pred_class)
+conf_mat(test_pred, truth = ozone, estimate = .pred_class) |>
+  autoplot(type = "heatmap")
+```
+
+## Krzywa ROC
+
+```{r}
+roc_auc(test_pred, truth = ozone, .pred_Wysokie)
+roc_curve(test_pred, truth = ozone, .pred_Wysokie) |>
+  autoplot()
+```
+
+## Walidacja krzyżowa
+
+```{r}
+air_folds <- vfold_cv(air_train, v = 10, strata = ozone)
+
+cv_results <- fit_resamples(
+  ozone_workflow,
+  resamples = air_folds,
+  metrics = metric_set(accuracy, roc_auc, sens, spec)
+)
+
+collect_metrics(cv_results)
+```
