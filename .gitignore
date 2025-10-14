@@ -47,3 +47,27 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# --- QUARTO OUTPUTS ---
+# Renderowane pliki (HTML, PDF, DOCX itp.)
+*_cache/
+*_files/
+*.html
+*.pdf
+*.docx
+
+# Renderowane podfoldery Quarto (np. przy renderowaniu całego projektu)
+_site/
+.quarto/
+.quarto-cache/
+
+# --- R ENVIRONMENT FILES ---
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+.Rprofile
+
+# --- SYSTEM / OS FILES ---
+.DS_Store
+Thumbs.db
